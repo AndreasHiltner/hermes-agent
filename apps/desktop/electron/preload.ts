@@ -121,6 +121,31 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
       return () => ipcRenderer.removeListener('hermes:pet-overlay:control', listener)
     }
   },
+  // Plugin overlay: a generic transparent, always-on-top window that hosts a
+  // plugin contribution (area 'pluginOverlay') outside the app window — the
+  // generic sibling of the pet overlay. Opened by plugins via ctx.os.openOverlay.
+  pluginOverlay: {
+    open: request => ipcRenderer.invoke('hermes:plugin-overlay:open', request),
+    close: () => ipcRenderer.invoke('hermes:plugin-overlay:close'),
+    // Overlay → main: TRANSIENT live drag/resize bounds — main snaps the
+    // window, never persists. reportBounds is the durable writer.
+    setBounds: bounds => ipcRenderer.send('hermes:plugin-overlay:set-bounds', { bounds }),
+    // Overlay → main: DURABLE bounds at drag/resize END — main snaps AND
+    // persists under its own hosted-plugin latch.
+    reportBounds: bounds => ipcRenderer.send('hermes:plugin-overlay:report-bounds', { bounds }),
+    setIgnoreMouse: ignore => ipcRenderer.send('hermes:plugin-overlay:ignore-mouse', ignore),
+    setFocusable: focusable => ipcRenderer.send('hermes:plugin-overlay:set-focusable', focusable),
+    // Overlay → main: which plugin this window hosts + remembered bounds.
+    whoami: () => ipcRenderer.invoke('hermes:plugin-overlay:whoami'),
+    // Main renderer: the overlay went away on its own (evicted, ⌘W, crash) —
+    // a pop-out toggle must never stay stale.
+    onClosed: callback => {
+      const listener = (_event, payload) => callback(payload)
+      ipcRenderer.on('hermes:plugin-overlay:closed', listener)
+
+      return () => ipcRenderer.removeListener('hermes:plugin-overlay:closed', listener)
+    }
+  },
   // HUD mode: the chrome-free floating chat. A full app renderer (own gateway)
   // sized as a floating bar, so it mounts the real composer. Main owns the
   // window; `onChanged` keeps every window's toggle truthful.
