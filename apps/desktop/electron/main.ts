@@ -297,6 +297,8 @@ import { mintGatewayWsTicket as mintOauthGatewayWsTicket, requestWithOauthFallba
 import { wireOauthSessionResponse } from './oauth-session-response'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { registerPetOverlayIpc } from './pet-overlay-ipc'
+import { clampToDisplay, defaultOverlayBounds, validateStoredBounds } from './plugin-overlay-geometry'
+import { registerPluginOverlayIpc, type PluginOverlayBounds } from './plugin-overlay-ipc'
 import {
   pendingNotice as pendingPluginCompatNotice,
   recordDismissed as recordPluginCompatDismissed
@@ -13887,6 +13889,204 @@ function closePetOverlay() {
   petOverlayWindow = null
 }
 
+// ── Plugin overlay (generic transparent window for plugin contributions) ───
+//
+// The generic sibling of the pet overlay: a single transparent, frameless,
+// always-on-top window that hosts ONE plugin contribution (`area:
+// 'pluginOverlay'`) outside the app window. Dash (the pencil helpdesk) is the
+// first user: its pane renders as a floating card INSIDE the app, and the
+// pop-out button moves it into this window so it floats over ALL apps while
+// the desktop shows through. The window carries its OWN gateway (a full app
+// renderer — `?win=plugoverlay&plugin=<id>`), so a plugin's host.request /
+// ctx.rest keep working with the app minimized. Geometry authority is the
+// overlay renderer (same contract as the pet overlay): it reports content
+// bounds after mount and after user drags/resizes.
+//
+// PRODUCT POLICY — one overlay at a time (declared in plugin-overlay-ipc.ts):
+// opening plugin B while plugin A is hosted closes A's window and respawns
+// for B. The state file is keyed per plugin, so a future
+// Map<pluginId, BrowserWindow> refactor for concurrent overlays is
+// mechanical. The two fields live in ONE record so they cannot drift in
+// lockstep (Vicky LOW).
+const pluginOverlay = { window: null as BrowserWindow | null, pluginId: null as string | null }
+
+// Per-plugin remembered bounds. Defaults only: once the user moves/resizes
+// an overlay, plugin-overlay-state.json wins (same pattern as hud-state.json).
+const PLUGIN_OVERLAY_STATE_PATH = path.join(app.getPath('userData'), 'plugin-overlay-state.json')
+
+function readPluginOverlayBounds(pluginId: string): PluginOverlayBounds | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(PLUGIN_OVERLAY_STATE_PATH, 'utf8'))
+
+    // Stored bounds are clamped against the CURRENT display topology at
+    // spawn (see spawnPluginOverlayWindow) — a monitor that was attached at
+    // save time may be gone now, and an off-screen respawn has no recovery.
+    return validateStoredBounds(raw?.[pluginId])
+  } catch {
+    // First run / unreadable — fall through to defaults.
+  }
+
+  return null
+}
+
+function persistPluginOverlayBounds(pluginId: string, bounds: PluginOverlayBounds) {
+  if (!pluginId || !bounds) {
+    return
+  }
+
+  try {
+    const existing = (() => {
+      try {
+        return JSON.parse(fs.readFileSync(PLUGIN_OVERLAY_STATE_PATH, 'utf8'))
+      } catch {
+        return {}
+      }
+    })()
+
+    existing[pluginId] = bounds
+    fs.mkdirSync(path.dirname(PLUGIN_OVERLAY_STATE_PATH), { recursive: true })
+    writeFileAtomic(PLUGIN_OVERLAY_STATE_PATH, JSON.stringify(existing, null, 2))
+  } catch (err) {
+    rememberLog(`[plugin-overlay] persist failed: ${err?.message || err}`)
+  }
+}
+
+function pluginOverlayUrl(pluginId: string) {
+  const query = `?win=plugoverlay&plugin=${encodeURIComponent(pluginId)}`
+
+  if (DEV_SERVER) {
+    return `${DEV_SERVER.endsWith('/') ? DEV_SERVER.slice(0, -1) : DEV_SERVER}/${query}#/`
+  }
+
+  return `${pathToFileURL(resolveRendererIndex()).toString()}${query}#/`
+}
+
+function spawnPluginOverlayWindow(pluginId: string, bounds: PluginOverlayBounds | null | undefined) {
+  const cursorDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  const workArea = cursorDisplay?.workArea
+  // Display-topology clamp (Vicky HIGH): remembered bounds from a
+  // disconnected monitor move to the nearest live display; a fresh spawn
+  // lands bottom-right of the cursor's display.
+  const spawned = bounds
+    ? clampToDisplay(bounds, screen.getAllDisplays().map(d => d.workArea))
+    : defaultOverlayBounds(workArea)
+
+  const win = new BrowserWindow({
+    width: spawned.width,
+    height: spawned.height,
+    x: spawned.x,
+    y: spawned.y,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    // No taskbar/alt-tab entry of its own (Windows/Linux); on macOS cmd-tab
+    // is app-level and Mission Control hiding keeps the main window the anchor.
+    skipTaskbar: !IS_MAC,
+    hasShadow: false,
+    alwaysOnTop: true,
+    hiddenInMissionControl: IS_MAC,
+    // INTERACTIVE by default (unlike the pet overlay's decoration-only
+    // posture): the overlay hosts real plugin UI — inputs, buttons — so it
+    // must be able to take keyboard focus.
+    focusable: true,
+    show: false,
+    // Fully transparent — the renderer paints only the contribution.
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: PRELOAD_PATH,
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      devTools: true,
+      // Keep the contribution alive while the main window is minimized —
+      // the whole point of popping out.
+      backgroundThrottling: false
+    }
+  })
+
+  // Float above other apps and follow the user across desktops (pet pattern).
+  win.setAlwaysOnTop(true, IS_MAC ? 'floating' : 'screen-saver')
+  win.setHiddenInMissionControl?.(true)
+
+  try {
+    win.setVisibleOnAllWorkspaces(
+      true,
+      IS_MAC ? { visibleOnFullScreen: true, skipTransformProcessType: true } : undefined
+    )
+  } catch {
+    // Not supported everywhere — best effort.
+  }
+
+  // The overlay sizes its own OS window — no inherited global zoom.
+  wireCommonWindowHandlers(win, zoomWiringForWindowKind('pluginOverlay'))
+
+  wireWindowReveal(win, { show: () => win.show() })
+
+  installWindowRendererLifecycle(win, { kind: 'plugin-overlay', callbacks: { log: rememberLog } })
+
+  win.on('closed', () => {
+    if (pluginOverlay.window === win) {
+      const evictedId = pluginOverlay.pluginId
+      pluginOverlay.window = null
+      pluginOverlay.pluginId = null
+
+      // Pet pop-in parity: if the overlay went away on its own (⌘W, crash,
+      // evicted by another plugin's open), the main renderer must learn so a
+      // pop-out toggle never stays stale. Harmless echo when we closed it.
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('hermes:plugin-overlay:closed', { pluginId: evictedId })
+      }
+    }
+  })
+
+  attachRendererConsoleCapture(win, 'plugin-overlay', rememberLog)
+  loadWindowUrl(win, pluginOverlayUrl(pluginId), 'Plugin overlay')
+
+  return win
+}
+
+function openPluginOverlay(pluginId: string, bounds: PluginOverlayBounds | null | undefined) {
+  if (pluginOverlay.window && !pluginOverlay.window.isDestroyed()) {
+    if (pluginOverlay.pluginId === pluginId) {
+      if (bounds) {
+        pluginOverlay.window.setBounds({
+          x: Math.round(bounds.x),
+          y: Math.round(bounds.y),
+          width: Math.max(120, Math.round(bounds.width)),
+          height: Math.max(80, Math.round(bounds.height))
+        })
+      }
+
+      pluginOverlay.window.show()
+
+      return pluginOverlay.window
+    }
+
+    // A different plugin wants the window — close the current host and let
+    // the new one spawn fresh (one-overlay-at-a-time policy; the closed
+    // handler broadcasts the eviction to the main renderer).
+    pluginOverlay.window.close()
+  }
+
+  pluginOverlay.pluginId = pluginId
+  pluginOverlay.window = spawnPluginOverlayWindow(pluginId, bounds)
+
+  return pluginOverlay.window
+}
+
+function closePluginOverlay() {
+  if (pluginOverlay.window && !pluginOverlay.window.isDestroyed()) {
+    pluginOverlay.window.close()
+  }
+
+  pluginOverlay.window = null
+  pluginOverlay.pluginId = null
+}
+
 // ── HUD mode ────────────────────────────────────────────────────────────────
 //
 // The chrome-free floating chat: a transparent, frameless, always-on-top
@@ -15218,6 +15418,18 @@ registerPetOverlayIpc({
   getPetOverlayWindow: () => petOverlayWindow,
   openPetOverlay,
   closePetOverlay
+})
+
+// --- Plugin overlay (generic transparent plugin window) — see
+// plugin-overlay-ipc.ts. ----------------------------------------------------
+registerPluginOverlayIpc({
+  getMainWindow: () => mainWindow,
+  getOverlayWindow: () => pluginOverlay.window,
+  getOverlayPluginId: () => pluginOverlay.pluginId,
+  openOverlay: openPluginOverlay,
+  closeOverlay: closePluginOverlay,
+  persistBounds: persistPluginOverlayBounds,
+  readBounds: readPluginOverlayBounds
 })
 
 // --- HUD mode (chrome-free floating chat) — see hud-ipc.ts. ---------------

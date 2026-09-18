@@ -3,6 +3,7 @@ import type { TranslucencyState } from '@hermes/shared/translucency'
 
 import type { ScreenshotApi } from '../electron/command-screenshot-types'
 import type { HermesNotification } from '../electron/notification-types'
+import type { PluginOverlayBounds } from '../electron/plugin-overlay-ipc'
 import type { PoolLimits } from '../electron/pool-limits'
 
 import type { WakeIndicatorState } from './lib/wake-indicator'
@@ -131,6 +132,23 @@ declare global {
         ready: () => void
         onSkip: (callback: () => void) => () => void
         onClosed: (callback: () => void) => () => void
+      }
+      // Plugin overlay: the generic transparent window hosting a plugin
+      // contribution (area 'pluginOverlay'). Opened from the MAIN window by
+      // plugins (ctx.os.openOverlay); the overlay window itself reports its
+      // content geometry back over set-bounds/set-size and asks for its plugin
+      // id over whoami.
+      pluginOverlay: {
+        open: (request: { pluginId: string; bounds?: PluginOverlayBounds; screen?: boolean }) => Promise<{ ok: boolean }>
+        close: () => Promise<{ ok: boolean }>
+        /** TRANSIENT live drag/resize — main snaps, never persists. */
+        setBounds: (bounds: PluginOverlayBounds) => void
+        /** DURABLE bounds at drag/resize end — main snaps + persists. */
+        reportBounds: (bounds: PluginOverlayBounds) => void
+        setIgnoreMouse: (ignore: boolean) => void
+        setFocusable: (focusable: boolean) => void
+        whoami: () => Promise<{ pluginId: string | null; bounds: PluginOverlayBounds | null }>
+        onClosed: (callback: (payload: { pluginId: string | null }) => void) => () => void
       }
       // In-chat onboarding assembly: grow the main window outward by per-edge
       // pixel deltas so the chat pane keeps its exact screen rect while the
