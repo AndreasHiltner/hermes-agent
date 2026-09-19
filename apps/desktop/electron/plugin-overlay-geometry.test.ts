@@ -5,7 +5,11 @@ import { test } from 'vitest'
 import {
   PLUGIN_OVERLAY_DEFAULT_HEIGHT,
   PLUGIN_OVERLAY_DEFAULT_WIDTH,
+  PLUGIN_OVERLAY_MASCOT_HEIGHT,
+  PLUGIN_OVERLAY_MASCOT_WIDTH,
+  clampMascotBounds,
   clampToDisplay,
+  defaultMascotBounds,
   defaultOverlayBounds,
   normalizeOverlayBounds,
   validateStoredBounds
@@ -105,4 +109,36 @@ test('defaultOverlayBounds fits a tiny work area', () => {
   const tiny = { x: 0, y: 0, width: 200, height: 100 }
 
   assert.deepEqual(defaultOverlayBounds(tiny), { x: 0, y: 0, width: 200, height: 100 })
+})
+
+test('defaultMascotBounds parks bottom-right inside the host with a margin', () => {
+  assert.deepEqual(defaultMascotBounds(MAIN), {
+    x: MAIN.x + MAIN.width - PLUGIN_OVERLAY_MASCOT_WIDTH - 16,
+    y: MAIN.y + MAIN.height - PLUGIN_OVERLAY_MASCOT_HEIGHT - 16,
+    width: PLUGIN_OVERLAY_MASCOT_WIDTH,
+    height: PLUGIN_OVERLAY_MASCOT_HEIGHT
+  })
+})
+
+test('clampMascotBounds forces the fixed mascot size and keeps it inside the host', () => {
+  // A renderer that tries to report a huge size + off-host position.
+  const clamped = clampMascotBounds({ x: 5000, y: -400, width: 400, height: 300 }, MAIN)
+
+  assert.deepEqual(clamped, {
+    x: MAIN.x + MAIN.width - PLUGIN_OVERLAY_MASCOT_WIDTH,
+    y: MAIN.y,
+    width: PLUGIN_OVERLAY_MASCOT_WIDTH,
+    height: PLUGIN_OVERLAY_MASCOT_HEIGHT
+  })
+})
+
+test('clampMascotBounds hugs the top-left of a host smaller than the mascot', () => {
+  const tiny = { x: 100, y: 200, width: 60, height: 40 }
+
+  assert.deepEqual(clampMascotBounds({ x: 130, y: 210, width: 96, height: 96 }, tiny), {
+    x: 100,
+    y: 200,
+    width: PLUGIN_OVERLAY_MASCOT_WIDTH,
+    height: PLUGIN_OVERLAY_MASCOT_HEIGHT
+  })
 })

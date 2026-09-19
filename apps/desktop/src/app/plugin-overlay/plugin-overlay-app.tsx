@@ -30,24 +30,42 @@ interface ResizeState {
 
 /**
  * The plugin-overlay window's only view: a transparent, draggable, resizable
- * frame hosting ONE plugin contribution (`area: 'pluginOverlay'`).
+ * frame hosting ONE plugin contribution (`area: 'pluginOverlay'`), in one of
+ * TWO postures owned by main:
  *
- * The window's geometry authority is THIS renderer (same contract as the pet
- * overlay): the header drags the window, the corner grip resizes it. Live
- * movement flows through `setBounds` (transient — main snaps the window);
- * the END of a drag/resize flows through `reportBounds` (durable — main
- * snaps AND persists under its own hosted-plugin latch).
+ *   mascot — a small non-activating sprite pinned to the Hermes app window.
+ *            The whole window is the drag handle; drag reports go to main,
+ *            which clamps the window into the main window's rect (the
+ *            sprite never leaves the app). No header, no resize grip.
+ *   card   — the interactive Q&A surface. Full opaque card, header drag,
+ *            corner resize grip, ✕ returns to the mascot.
+ *
+ * The window's geometry authority is THIS renderer (same contract as the
+ * pet overlay): the header drags the window, the corner grip resizes it.
+ * Live movement flows through `setBounds` (transient — main snaps the
+ * window); the END of a drag/resize flows through `reportBounds` (durable —
+ * main snaps AND persists under its own hosted-plugin latch).
  *
  * The contribution renders inside a ContribBoundary so a crashing plugin
  * degrades to an error card, never a white window.
  */
-export function PluginOverlayApp({ pluginId, ready }: { pluginId: null | string; ready: boolean }) {
+export function PluginOverlayApp({
+  pluginId,
+  mode,
+  ready
+}: {
+  pluginId: null | string
+  mode: null | 'mascot' | 'card'
+  ready: boolean
+}) {
   const dragRef = useRef<DragState | null>(null)
   const resizeRef = useRef<ResizeState | null>(null)
 
   const bridge = window.hermesDesktop?.pluginOverlay
   const contributions = useContributions('pluginOverlay')
   const contribution = contributions.find(c => c.source === `plugin:${pluginId}`) ?? contributions[0]
+
+  const isMascot = mode === 'mascot'
 
   const sendBounds = useCallback(
     (bounds: { x: number; y: number; width: number; height: number }, durable: boolean) => {
@@ -110,6 +128,11 @@ export function PluginOverlayApp({ pluginId, ready }: { pluginId: null | string;
         },
         true
       )
+    } else if (isMascot) {
+      // A press without drag slop is a click — expand to the card. Pointer
+      // events are the reliable signal here: the window is focusable:false
+      // in mascot posture, where a synthetic browser `click` never fires.
+      bridge?.setMode('card')
     }
   }
 
@@ -170,16 +193,57 @@ export function PluginOverlayApp({ pluginId, ready }: { pluginId: null | string;
     void bridge?.close()
   }
 
+  const backToMascot = () => {
+    bridge?.setMode('mascot')
+  }
+
+  // ── Mascot posture: the whole window IS the sprite. Drag moves the
+  // window (main clamps into the app rect); a click (below drag slop)
+  // expands to the card. No header, no grip — nothing but the sprite.
+  if (isMascot) {
+    return (
+      <div
+        onPointerDown={onHeaderPointerDown}
+        onPointerMove={onHeaderPointerMove}
+        onPointerUp={onHeaderPointerUp}
+        style={{
+          alignItems: 'center',
+          background: 'transparent',
+          cursor: 'grab',
+          display: 'flex',
+          height: '100vh',
+          justifyContent: 'center',
+          touchAction: 'none',
+          userSelect: 'none',
+          width: '100vw'
+        }}
+        title="Ask Dash"
+      >
+        {!ready ? (
+          <div style={{ color: 'var(--ui-text-secondary)', fontSize: 12, padding: 16 }}>…</div>
+        ) : contribution?.render ? (
+          <ContribBoundary id={contribution.id} variant="pane">
+            <ContribRender render={contribution.render} />
+          </ContribBoundary>
+        ) : null}
+      </div>
+    )
+  }
+
+  // ── Card posture: full opaque card with the header drag handle.
   return (
     <div
       style={{
+        // The card paints its own full surface — Electron cannot flip
+        // `transparent` at runtime, so the content just fills the window
+        // and the desktop shows nowhere. SQUARE corners: without a
+        // compositor, rounded corners would leave black alpha pixels.
+        background: 'var(--ui-bg-elevated)',
         display: 'flex',
         flexDirection: 'column',
         height: '100vh',
+        overflow: 'hidden',
         width: '100vw',
-        // The overlay is a plain window — the plugin's own contribution
-        // decides its interactive regions; the host never click-throughs.
-        background: 'transparent',
         userSelect: 'none'
       }}
     >
@@ -196,7 +260,7 @@ export function PluginOverlayApp({ pluginId, ready }: { pluginId: null | string;
           gap: 8,
           padding: '8px 10px',
           touchAction: 'none',
-          background: 'var(--ui-bg-elevated)',
+          background: 'transparent',
           borderBottom: '1px solid var(--ui-stroke-secondary)',
           color: 'var(--ui-text-secondary)',
           fontSize: 12
@@ -205,6 +269,29 @@ export function PluginOverlayApp({ pluginId, ready }: { pluginId: null | string;
         <span style={{ flex: 1, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {pluginId ?? 'Plugin overlay'}
         </span>
+        <button
+          aria-label="Shrink to mascot"
+          onClick={backToMascot}
+          onPointerDown={e => e.stopPropagation()}
+          onPointerUp={e => e.stopPropagation()}
+          style={{
+            alignItems: 'center',
+            background: 'transparent',
+            border: '1px solid var(--ui-stroke-secondary)',
+            borderRadius: 6,
+            color: 'var(--ui-text-secondary)',
+            cursor: 'pointer',
+            display: 'flex',
+            height: 22,
+            justifyContent: 'center',
+            padding: 0,
+            width: 22
+          }}
+          title="Shrink to the pencil"
+          type="button"
+        >
+          –
+        </button>
         <button
           aria-label="Close overlay"
           onClick={close}
@@ -238,6 +325,8 @@ export function PluginOverlayApp({ pluginId, ready }: { pluginId: null | string;
           overflow: 'auto',
           userSelect: 'text',
           WebkitUserSelect: 'text',
+          // The card surface: opaque for readability (the card posture is
+          // the "non-transparent window" by design).
           background: 'var(--ui-bg-elevated)'
         }}
       >

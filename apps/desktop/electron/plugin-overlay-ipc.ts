@@ -33,6 +33,10 @@ export interface PluginOverlayBounds {
 
 export interface PluginOverlayOpenRequest {
   pluginId: string
+  /** The posture the overlay should take: 'mascot' (non-activating sprite
+   *  pinned to the app window — Dash's auto-start) or 'card' (interactive
+   *  Q&A). Defaults to 'card'. */
+  mode?: PluginOverlayMode
   /** Optional bounds. `screen: false` (default) means VIEWPORT space: the
    *  pop-out button passes the pane's in-window rect and main converts it to
    *  screen space via the main window's content origin (pet overlay parity).
@@ -41,6 +45,8 @@ export interface PluginOverlayOpenRequest {
   screen?: boolean
 }
 
+export type PluginOverlayMode = 'mascot' | 'card'
+
 export interface PluginOverlayIpcDeps {
   /** The main app window (viewport→screen conversion + close broadcast). */
   getMainWindow: () => BrowserWindow | null
@@ -48,24 +54,41 @@ export interface PluginOverlayIpcDeps {
   getOverlayWindow: () => BrowserWindow | null
   /** The plugin id the current overlay window hosts, or null. */
   getOverlayPluginId: () => string | null
+  /** The overlay's current posture: mascot (non-activating sprite pinned to
+   *  the app window) or card (interactive Q&A card). */
+  getOverlayMode: () => PluginOverlayMode | null
   /** Spawn (or re-show at bounds) the overlay window for a plugin id.
    *  Returns the window, or null when spawning failed. */
-  openOverlay: (pluginId: string, bounds?: PluginOverlayBounds) => BrowserWindow | null
+  openOverlay: (pluginId: string, mode: PluginOverlayMode, bounds?: PluginOverlayBounds) => BrowserWindow | null
   closeOverlay: () => void
+  /** Flip the EXISTING window's posture. Main owns the geometry switch —
+   *  the renderer only says which posture it needs. */
+  setOverlayMode: (mode: PluginOverlayMode) => void
+  /** Posture-aware bounds enforcement for renderer-reported geometry: the
+   *  mascot clamps into the main window's rect at fixed size; the card
+   *  clamps to minimums. Main implements both. */
+  snapBounds: (bounds: PluginOverlayBounds) => PluginOverlayBounds
+  /** Apply (or clear, with []) the window's X11 shape. Main owns the
+   *  resizable-flip dance; the IPC handler only validates the rects. */
+  setShape: (rects: Array<{ x: number; y: number; width: number; height: number }>) => void
   /** Persist the reported bounds to disk (main-side, userData), keyed by the
    *  CURRENTLY HOSTED plugin (main's own latch — the renderer-supplied id is
    *  never trusted for persistence). */
   persistBounds: (pluginId: string, bounds: PluginOverlayBounds) => void
-  /** Read persisted bounds for a plugin id (may be null). */
-  readBounds: (pluginId: string) => PluginOverlayBounds | null
+  /** Read persisted bounds for a plugin id + posture (may be null). */
+  readBounds: (pluginId: string, mode: PluginOverlayMode) => PluginOverlayBounds | null
 }
 
 export function registerPluginOverlayIpc({
   getMainWindow,
   getOverlayWindow,
   getOverlayPluginId,
+  getOverlayMode,
   openOverlay,
   closeOverlay,
+  setOverlayMode,
+  snapBounds,
+  setShape,
   persistBounds,
   readBounds
 }: PluginOverlayIpcDeps): void {
@@ -96,6 +119,11 @@ export function registerPluginOverlayIpc({
       return { ok: false }
     }
 
+    // Posture: 'mascot' (non-activating sprite, auto-on-register) or 'card'
+    // (interactive Q&A). Unknown → card (the safe default: an unexpected
+    // mascot spawn is just a small sprite, an unexpected card is a full UI).
+    const mode: PluginOverlayMode = request?.mode === 'mascot' ? 'mascot' : 'card'
+
     // Viewport→screen conversion (pet-overlay-ipc.ts parity): a fresh pop-out
     // passes the pane's in-window rect; add the main window's content origin
     // so the overlay lands where it sat in-window. Screen-space requests
@@ -121,7 +149,7 @@ export function registerPluginOverlayIpc({
     }
 
     try {
-      const win = openOverlay(pluginId, screenBounds)
+      const win = openOverlay(pluginId, mode, screenBounds)
 
       return { ok: Boolean(win) }
     } catch {
@@ -164,14 +192,9 @@ export function registerPluginOverlayIpc({
       return
     }
 
-    const next = {
-      x: Math.round(bounds.x),
-      y: Math.round(bounds.y),
-      width: Math.max(120, Math.round(bounds.width)),
-      height: Math.max(80, Math.round(bounds.height))
-    }
-
-    applyBoundsWithResizeFlip(win as ResizeFlipWindow, next)
+    // Posture-aware snap: mascot → fixed size clamped into the app window;
+    // card → min-clamped free bounds. Main is the geometry authority.
+    applyBoundsWithResizeFlip(win as ResizeFlipWindow, snapBounds(bounds))
   })
 
   ipcMain.on('hermes:plugin-overlay:report-bounds', (event, payload) => {
@@ -187,12 +210,7 @@ export function registerPluginOverlayIpc({
       return
     }
 
-    const next = {
-      x: Math.round(bounds.x),
-      y: Math.round(bounds.y),
-      width: Math.max(120, Math.round(bounds.width)),
-      height: Math.max(80, Math.round(bounds.height))
-    }
+    const next = snapBounds(bounds)
 
     applyBoundsWithResizeFlip(win as ResizeFlipWindow, next)
 
@@ -215,10 +233,70 @@ export function registerPluginOverlayIpc({
     }
   })
 
-  // Keyboard: the overlay spawns INTERACTIVE (focusable:true — it hosts real
-  // plugin UI), but a mascot-style contribution can ask to flip non-activating
-  // (focusable:false, the pet overlay pattern) so it never steals the app's
-  // cmd/alt-tab anchor. The contribution flips back when it needs input.
+  // WINDOW SHAPE — the no-compositor transparency path. Without a running
+  // compositor, Chromium creates `transparent: true` windows with a 24-bit
+  // visual (no alpha channel), so the transparent background renders BLACK.
+  // The X11 SHAPE extension clips a window server-side to a set of rects —
+  // no alpha needed. A mascot contribution reports its opaque sprite regions
+  // here; main carves the window so the desktop shows through everywhere
+  // else. The card posture clears the shape (full window, opaque surface).
+  ipcMain.on('hermes:plugin-overlay:set-shape', (event, payload) => {
+    const win = getOverlayWindow()
+
+    if (!win || win.isDestroyed() || event.sender !== win.webContents) {
+      return
+    }
+
+    const raw = Array.isArray(payload?.rects) ? payload.rects : null
+
+    if (!raw) {
+      return
+    }
+
+    // Validate + round: integers only (X rects), non-negative, bounded count.
+    interface ShapeRectCandidate {
+      x?: unknown
+      y?: unknown
+      width?: unknown
+      height?: unknown
+    }
+
+    const candidates = (raw as ShapeRectCandidate[]).slice(0, 64)
+
+    const rects: Array<{ x: number; y: number; width: number; height: number }> = []
+
+    for (const r of candidates) {
+      if (!r || typeof r !== 'object') {
+        continue
+      }
+
+      const { x, y, width, height } = r
+
+      if (![x, y, width, height].every(n => typeof n === 'number' && Number.isFinite(n))) {
+        continue
+      }
+
+      const rx = Math.max(0, Math.round(x as number))
+      const ry = Math.max(0, Math.round(y as number))
+      const rw = Math.max(0, Math.round(width as number))
+      const rh = Math.max(0, Math.round(height as number))
+
+      if (rw > 0 && rh > 0) {
+        rects.push({ x: rx, y: ry, width: rw, height: rh })
+      }
+    }
+
+    // setShape on Linux requires a resizable window (Electron quirk) — main
+    // owns the flip + the reveal gate.
+    setShape(rects)
+  })
+
+  // Keyboard: the overlay is ALWAYS focusable:true (see spawn comment — a
+  // focusable:false window on xfwm4 is not managed and a runtime
+  // setFocusable(true) does not reliably re-manage it, so the card would
+  // never take keystrokes). "Non-activating" for the mascot is therefore
+  // showInactive() + blur, never a focusable flip. This IPC only moves
+  // keyboard focus in/out of an already-managed window.
   ipcMain.on('hermes:plugin-overlay:set-focusable', (event, focusable) => {
     const win = getOverlayWindow()
 
@@ -226,24 +304,44 @@ export function registerPluginOverlayIpc({
       return
     }
 
-    win.setFocusable(Boolean(focusable))
-
     if (focusable) {
       win.focus()
+      win.webContents.focus()
+    } else {
+      win.blur()
     }
   })
 
-  // The overlay asks which plugin it was spawned for + its remembered bounds.
+  // The overlay renderer flips its own posture: a click on the mascot asks
+  // main to expand it into the interactive card, the card's ✕ asks to
+  // shrink back. Main owns the geometry switch (focusable/always-on-top/
+  // size), the renderer only states which posture it needs.
+  ipcMain.on('hermes:plugin-overlay:set-mode', (event, mode) => {
+    if (!overlayOwns(event)) {
+      return
+    }
+
+    if (mode !== 'mascot' && mode !== 'card') {
+      return
+    }
+
+    setOverlayMode(mode)
+  })
+
+  // The overlay asks which plugin it was spawned for + its current posture
+  // and remembered bounds.
   ipcMain.handle('hermes:plugin-overlay:whoami', async event => {
     if (!overlayOwns(event)) {
-      return { pluginId: null, bounds: null }
+      return { pluginId: null, mode: null, bounds: null }
     }
 
     const pluginId = getOverlayPluginId()
+    const mode = getOverlayMode()
 
     return {
       pluginId,
-      bounds: pluginId ? readBounds(pluginId) : null
+      mode,
+      bounds: pluginId && mode ? readBounds(pluginId, mode) : null
     }
   })
 

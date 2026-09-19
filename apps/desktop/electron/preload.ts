@@ -121,9 +121,11 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
       return () => ipcRenderer.removeListener('hermes:pet-overlay:control', listener)
     }
   },
-  // Plugin overlay: a generic transparent, always-on-top window that hosts a
-  // plugin contribution (area 'pluginOverlay') outside the app window — the
-  // generic sibling of the pet overlay. Opened by plugins via ctx.os.openOverlay.
+  // Plugin overlay: the generic transparent window hosting a plugin
+  // contribution (area 'pluginOverlay'). TWO postures: 'mascot' (a small
+  // non-activating sprite bound to the app window — Dash's auto-start
+  // pencil) and 'card' (the interactive Q&A card). The overlay renderer
+  // swaps views and flips posture over set-mode.
   pluginOverlay: {
     open: request => ipcRenderer.invoke('hermes:plugin-overlay:open', request),
     close: () => ipcRenderer.invoke('hermes:plugin-overlay:close'),
@@ -135,8 +137,23 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     reportBounds: bounds => ipcRenderer.send('hermes:plugin-overlay:report-bounds', { bounds }),
     setIgnoreMouse: ignore => ipcRenderer.send('hermes:plugin-overlay:ignore-mouse', ignore),
     setFocusable: focusable => ipcRenderer.send('hermes:plugin-overlay:set-focusable', focusable),
-    // Overlay → main: which plugin this window hosts + remembered bounds.
+    // Overlay → main: carve (rects) or clear ([]) the X11 window shape — the
+    // no-compositor transparency path for mascot silhouettes, and the
+    // card's "painted opaque" confirmation.
+    setShape: rects => ipcRenderer.send('hermes:plugin-overlay:set-shape', { rects }),
+    // Overlay → main: flip posture (mascot click → card, card ✕ → mascot).
+    setMode: mode => ipcRenderer.send('hermes:plugin-overlay:set-mode', mode),
+    // Overlay → main: which plugin this window hosts + current posture +
+    // remembered bounds.
     whoami: () => ipcRenderer.invoke('hermes:plugin-overlay:whoami'),
+    // Overlay renderer: main flipped the posture (native geometry changed) —
+    // swap the view now.
+    onMode: callback => {
+      const listener = (_event, mode) => callback(mode)
+      ipcRenderer.on('hermes:plugin-overlay:mode', listener)
+
+      return () => ipcRenderer.removeListener('hermes:plugin-overlay:mode', listener)
+    },
     // Main renderer: the overlay went away on its own (evicted, ⌘W, crash) —
     // a pop-out toggle must never stay stale.
     onClosed: callback => {

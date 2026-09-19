@@ -13,6 +13,16 @@ export const PLUGIN_OVERLAY_DEFAULT_HEIGHT = 420
 // Default margin to the work-area edge when no remembered bounds exist.
 export const PLUGIN_OVERLAY_EDGE_MARGIN = 16
 
+// Mascot posture (the Dash pencil): a small non-activating sprite pinned to
+// the Hermes main window. Size is FIXED — main enforces it on every
+// set-bounds; the renderer reports drag positions and main clamps them into
+// the main window's rect (the mascot must never leave the app window).
+export const PLUGIN_OVERLAY_MASCOT_WIDTH = 96
+export const PLUGIN_OVERLAY_MASCOT_HEIGHT = 96
+// Smallest size a stored mascot record may carry (stored size is ignored on
+// spawn — the fixed mascot size wins — but a bogus tiny record is discarded).
+export const PLUGIN_OVERLAY_MASCOT_MIN_STORED = 48
+
 export interface PluginOverlayBounds {
   x: number
   y: number
@@ -73,6 +83,30 @@ export function validateStoredBounds(value: unknown): PluginOverlayBounds | null
   const height = Math.round(candidate.height)
 
   if (width < PLUGIN_OVERLAY_MIN_WIDTH || height < PLUGIN_OVERLAY_MIN_HEIGHT) {
+    return null
+  }
+
+  return { x: Math.round(candidate.x), y: Math.round(candidate.y), width, height }
+}
+
+/** Stored mascot bounds → valid bounds or null. The mascot's stored SIZE is
+ *  never trusted (the fixed mascot size wins on spawn/clamp), but a bogus
+ *  tiny record is discarded wholesale so a default spot is used. */
+export function validateStoredMascotBounds(value: unknown): PluginOverlayBounds | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const candidate = value as Partial<Record<keyof PluginOverlayBounds, unknown>>
+
+  if (!finite(candidate.x) || !finite(candidate.y) || !finite(candidate.width) || !finite(candidate.height)) {
+    return null
+  }
+
+  const width = Math.round(candidate.width)
+  const height = Math.round(candidate.height)
+
+  if (width < PLUGIN_OVERLAY_MASCOT_MIN_STORED || height < PLUGIN_OVERLAY_MASCOT_MIN_STORED) {
     return null
   }
 
@@ -171,5 +205,36 @@ export function defaultOverlayBounds(area?: OverlayWorkArea): PluginOverlayBound
     y: Math.max(area.y, area.y + area.height - height - PLUGIN_OVERLAY_EDGE_MARGIN),
     width,
     height
+  }
+}
+
+/** Mascot default position: bottom-right INSIDE the host rect, hugging the
+ *  edge (the pencil starts where a help icon would live). Size is ignored —
+ *  the fixed mascot size wins. */
+export function defaultMascotBounds(host: OverlayWorkArea): PluginOverlayBounds {
+  const margin = 16
+
+  return {
+    x: host.x + host.width - PLUGIN_OVERLAY_MASCOT_WIDTH - margin,
+    y: host.y + host.height - PLUGIN_OVERLAY_MASCOT_HEIGHT - margin,
+    width: PLUGIN_OVERLAY_MASCOT_WIDTH,
+    height: PLUGIN_OVERLAY_MASCOT_HEIGHT
+  }
+}
+
+/** Clamp a mascot position INTO the host rect — "only on the Hermes
+ *  Desktop". If the host is smaller than the mascot, the sprite hugs the
+ *  host's top-left (it must never render outside the app window). Size is
+ *  forced to the mascot constants — a renderer-reported size is never
+ *  trusted for the mascot posture. */
+export function clampMascotBounds(pos: PluginOverlayBounds, host: OverlayWorkArea): PluginOverlayBounds {
+  const maxX = Math.max(host.x, host.x + host.width - PLUGIN_OVERLAY_MASCOT_WIDTH)
+  const maxY = Math.max(host.y, host.y + host.height - PLUGIN_OVERLAY_MASCOT_HEIGHT)
+
+  return {
+    x: Math.min(Math.max(pos.x, host.x), maxX),
+    y: Math.min(Math.max(pos.y, host.y), maxY),
+    width: PLUGIN_OVERLAY_MASCOT_WIDTH,
+    height: PLUGIN_OVERLAY_MASCOT_HEIGHT
   }
 }

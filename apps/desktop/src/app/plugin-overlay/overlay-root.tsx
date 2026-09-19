@@ -53,11 +53,14 @@ export function mountPluginOverlay(): void {
 }
 
 /**
- * Boots the gateway, asks main which plugin this window hosts, loads that
- * plugin, then hands the contribution to PluginOverlayApp.
+ * Boots the gateway, asks main which plugin this window hosts and in which
+ * posture (mascot sprite vs interactive card), loads that plugin, then hands
+ * the contribution to PluginOverlayApp. Main owns posture flips: it pushes
+ * them over `onMode` and the boot re-reads the current one via `whoami`.
  */
 function PluginOverlayBoot() {
   const [pluginId, setPluginId] = useState<null | string>(null)
+  const [mode, setMode] = useState<null | 'mascot' | 'card'>(null)
   const [failed, setFailed] = useState<null | string>(null)
   const loadedRef = useRef(false)
 
@@ -76,6 +79,14 @@ function PluginOverlayBoot() {
   })
 
   const gatewayState = useStore($gatewayState)
+
+  // Posture flips (mascot click → card, card ✕ → mascot) arrive from main
+  // once the overlay is live.
+  useEffect(() => {
+    const bridge = window.hermesDesktop?.pluginOverlay
+
+    return bridge?.onMode(setMode)
+  }, [])
 
   useEffect(() => {
     if (loadedRef.current || failed || gatewayState !== 'open') {
@@ -111,7 +122,10 @@ function PluginOverlayBoot() {
           return
         }
 
-        if (!cancelled) setPluginId(who.pluginId)
+        if (!cancelled) {
+          setPluginId(who.pluginId)
+          setMode(who.mode === 'mascot' ? 'mascot' : 'card')
+        }
       } catch (err) {
         if (!cancelled) {
           setFailed(`Overlay boot failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -142,5 +156,5 @@ function PluginOverlayBoot() {
     )
   }
 
-  return <PluginOverlayApp pluginId={pluginId} ready={gatewayState === 'open'} />
+  return <PluginOverlayApp pluginId={pluginId} mode={mode} ready={gatewayState === 'open'} />
 }
