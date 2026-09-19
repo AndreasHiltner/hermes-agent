@@ -135,8 +135,6 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     // Overlay → main: DURABLE bounds at drag/resize END — main snaps AND
     // persists under its own hosted-plugin latch.
     reportBounds: bounds => ipcRenderer.send('hermes:plugin-overlay:report-bounds', { bounds }),
-    setIgnoreMouse: ignore => ipcRenderer.send('hermes:plugin-overlay:ignore-mouse', ignore),
-    setFocusable: focusable => ipcRenderer.send('hermes:plugin-overlay:set-focusable', focusable),
     // Overlay → main: carve (rects) or clear ([]) the X11 window shape — the
     // no-compositor transparency path for mascot silhouettes, and the
     // card's "painted opaque" confirmation.

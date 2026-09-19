@@ -304,11 +304,12 @@ import {
   defaultOverlayBounds,
   normalizeOverlayBounds,
   validateStoredBounds,
-  validateStoredMascotBounds,
   PLUGIN_OVERLAY_DEFAULT_HEIGHT,
   PLUGIN_OVERLAY_DEFAULT_WIDTH,
   PLUGIN_OVERLAY_MASCOT_HEIGHT,
-  PLUGIN_OVERLAY_MASCOT_WIDTH
+  PLUGIN_OVERLAY_MASCOT_MIN_STORED,
+  PLUGIN_OVERLAY_MASCOT_WIDTH,
+  PLUGIN_OVERLAY_MIN_WIDTH
 } from './plugin-overlay-geometry'
 import { registerPluginOverlayIpc, type PluginOverlayBounds, type PluginOverlayMode } from './plugin-overlay-ipc'
 import { applyBoundsWithResizeFlip, type ResizeFlipWindow } from './resize-flip'
@@ -14205,7 +14206,9 @@ function readPluginOverlayBounds(pluginId: string | null, mode: PluginOverlayMod
     // save time may be gone now, and an off-screen respawn has no recovery.
     // Mascot records validate their own (smaller) minimum; the stored size
     // is ignored on spawn — the fixed mascot size always wins.
-    return mode === 'mascot' ? validateStoredMascotBounds(stored) : validateStoredBounds(stored)
+    return mode === 'mascot'
+      ? validateStoredBounds(stored, PLUGIN_OVERLAY_MASCOT_MIN_STORED)
+      : validateStoredBounds(stored, PLUGIN_OVERLAY_MIN_WIDTH)
   } catch {
     // First run / unreadable — fall through to defaults.
   }

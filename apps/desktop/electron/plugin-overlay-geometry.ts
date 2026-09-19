@@ -67,8 +67,12 @@ export function normalizeOverlayBounds(value: unknown): PluginOverlayBounds | nu
 
 /** Stored bounds → valid bounds or null. Stricter than normalize: a stored
  *  record with a bogus shape or an under-min size is discarded wholesale
- *  (treated as missing → spawn defaults), never coerced upward. */
-export function validateStoredBounds(value: unknown): PluginOverlayBounds | null {
+ *  (treated as missing → spawn defaults), never coerced upward.
+ *  `minSize` differs by posture: the card enforces the window minimums, while
+ *  a stored mascot record may carry a smaller size (the stored SIZE is never
+ *  trusted for the mascot posture — the fixed mascot size wins — but a bogus
+ *  tiny record is discarded wholesale so a default spot is used). */
+export function validateStoredBounds(value: unknown, minSize: number): PluginOverlayBounds | null {
   if (!value || typeof value !== 'object') {
     return null
   }
@@ -82,31 +86,7 @@ export function validateStoredBounds(value: unknown): PluginOverlayBounds | null
   const width = Math.round(candidate.width)
   const height = Math.round(candidate.height)
 
-  if (width < PLUGIN_OVERLAY_MIN_WIDTH || height < PLUGIN_OVERLAY_MIN_HEIGHT) {
-    return null
-  }
-
-  return { x: Math.round(candidate.x), y: Math.round(candidate.y), width, height }
-}
-
-/** Stored mascot bounds → valid bounds or null. The mascot's stored SIZE is
- *  never trusted (the fixed mascot size wins on spawn/clamp), but a bogus
- *  tiny record is discarded wholesale so a default spot is used. */
-export function validateStoredMascotBounds(value: unknown): PluginOverlayBounds | null {
-  if (!value || typeof value !== 'object') {
-    return null
-  }
-
-  const candidate = value as Partial<Record<keyof PluginOverlayBounds, unknown>>
-
-  if (!finite(candidate.x) || !finite(candidate.y) || !finite(candidate.width) || !finite(candidate.height)) {
-    return null
-  }
-
-  const width = Math.round(candidate.width)
-  const height = Math.round(candidate.height)
-
-  if (width < PLUGIN_OVERLAY_MASCOT_MIN_STORED || height < PLUGIN_OVERLAY_MASCOT_MIN_STORED) {
+  if (width < minSize || height < minSize) {
     return null
   }
 

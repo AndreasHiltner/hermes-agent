@@ -22,14 +22,8 @@ import { type BrowserWindow, ipcMain } from 'electron'
 
 import { applyBoundsWithResizeFlip, type ResizeFlipWindow } from './resize-flip'
 
-/** Overlay content bounds in SCREEN (DIP) space — the overlay renderer is the
- *  only writer; main just persists what it reports. */
-export interface PluginOverlayBounds {
-  x: number
-  y: number
-  width: number
-  height: number
-}
+export type { PluginOverlayBounds } from './plugin-overlay-geometry'
+import type { PluginOverlayBounds } from './plugin-overlay-geometry'
 
 export interface PluginOverlayOpenRequest {
   pluginId: string
@@ -223,16 +217,6 @@ export function registerPluginOverlayIpc({
     }
   })
 
-  // Click-through for mascot-style overlays: transparent margins pass clicks
-  // to whatever is behind (the pet overlay pattern).
-  ipcMain.on('hermes:plugin-overlay:ignore-mouse', (event, ignore) => {
-    const win = getOverlayWindow()
-
-    if (win && !win.isDestroyed() && event.sender === win.webContents) {
-      win.setIgnoreMouseEvents(Boolean(ignore), { forward: true })
-    }
-  })
-
   // WINDOW SHAPE — the no-compositor transparency path. Without a running
   // compositor, Chromium creates `transparent: true` windows with a 24-bit
   // visual (no alpha channel), so the transparent background renders BLACK.
@@ -289,27 +273,6 @@ export function registerPluginOverlayIpc({
     // setShape on Linux requires a resizable window (Electron quirk) — main
     // owns the flip + the reveal gate.
     setShape(rects)
-  })
-
-  // Keyboard: the overlay is ALWAYS focusable:true (see spawn comment — a
-  // focusable:false window on xfwm4 is not managed and a runtime
-  // setFocusable(true) does not reliably re-manage it, so the card would
-  // never take keystrokes). "Non-activating" for the mascot is therefore
-  // showInactive() + blur, never a focusable flip. This IPC only moves
-  // keyboard focus in/out of an already-managed window.
-  ipcMain.on('hermes:plugin-overlay:set-focusable', (event, focusable) => {
-    const win = getOverlayWindow()
-
-    if (!win || win.isDestroyed() || event.sender !== win.webContents) {
-      return
-    }
-
-    if (focusable) {
-      win.focus()
-      win.webContents.focus()
-    } else {
-      win.blur()
-    }
   })
 
   // The overlay renderer flips its own posture: a click on the mascot asks

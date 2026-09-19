@@ -6,7 +6,10 @@ import {
   PLUGIN_OVERLAY_DEFAULT_HEIGHT,
   PLUGIN_OVERLAY_DEFAULT_WIDTH,
   PLUGIN_OVERLAY_MASCOT_HEIGHT,
+  PLUGIN_OVERLAY_MASCOT_MIN_STORED,
   PLUGIN_OVERLAY_MASCOT_WIDTH,
+  PLUGIN_OVERLAY_MIN_HEIGHT,
+  PLUGIN_OVERLAY_MIN_WIDTH,
   clampMascotBounds,
   clampToDisplay,
   defaultMascotBounds,
@@ -36,18 +39,30 @@ test('normalizeOverlayBounds rejects malformed geometry', () => {
 })
 
 test('validateStoredBounds rejects under-min sizes instead of coercing', () => {
-  assert.equal(validateStoredBounds({ x: 0, y: 0, width: 100, height: 80 }), null)
-  assert.equal(validateStoredBounds({ x: 0, y: 0, width: 320, height: 60 }), null)
-  assert.equal(validateStoredBounds(null), null)
+  assert.equal(validateStoredBounds({ x: 0, y: 0, width: 100, height: 80 }, PLUGIN_OVERLAY_MIN_WIDTH), null)
+  assert.equal(validateStoredBounds({ x: 0, y: 0, width: 320, height: 60 }, PLUGIN_OVERLAY_MIN_WIDTH), null)
+  assert.equal(validateStoredBounds(null, PLUGIN_OVERLAY_MIN_WIDTH), null)
 })
 
 test('validateStoredBounds accepts a legal stored record', () => {
-  assert.deepEqual(validateStoredBounds({ x: 100.4, y: 200.6, width: 320, height: 420 }), {
+  assert.deepEqual(validateStoredBounds({ x: 100.4, y: 200.6, width: 320, height: 420 }, PLUGIN_OVERLAY_MIN_WIDTH), {
     x: 100,
     y: 201,
     width: 320,
     height: 420
   })
+})
+
+test('validateStoredBounds uses the mascot minimum for mascot records', () => {
+  // A mascot record may carry a size below the card minimum (48 vs 120) —
+  // only the smaller mascot minimum applies.
+  assert.deepEqual(validateStoredBounds({ x: 0, y: 0, width: 60, height: 60 }, PLUGIN_OVERLAY_MASCOT_MIN_STORED), {
+    x: 0,
+    y: 0,
+    width: 60,
+    height: 60
+  })
+  assert.equal(validateStoredBounds({ x: 0, y: 0, width: 30, height: 60 }, PLUGIN_OVERLAY_MASCOT_MIN_STORED), null)
 })
 
 test('clampToDisplay leaves on-screen bounds alone', () => {

@@ -17,7 +17,7 @@ import { createPluginI18n, type PluginI18n } from '@/i18n'
 import { readKey, writeKey } from '@/lib/storage'
 import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } from '@/store/native-notifications'
 
-import type { PluginOverlayBounds } from '../../electron/plugin-overlay-ipc'
+import type { PluginOverlayBounds } from '../../electron/plugin-overlay-geometry'
 import { type GatewayEventListener, onGatewayEvent } from './events'
 import { registry } from './registry'
 import type { Contribution } from './types'
