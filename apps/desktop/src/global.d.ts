@@ -3,7 +3,7 @@ import type { TranslucencyState } from '@hermes/shared/translucency'
 
 import type { ScreenshotApi } from '../electron/command-screenshot-types'
 import type { HermesNotification } from '../electron/notification-types'
-import type { PluginOverlayBounds } from '../electron/plugin-overlay-ipc'
+import type { PluginOverlayBounds } from '../electron/plugin-overlay-geometry'
 import type { PoolLimits } from '../electron/pool-limits'
 
 import type { WakeIndicatorState } from './lib/wake-indicator'
@@ -152,8 +152,6 @@ declare global {
         setBounds: (bounds: PluginOverlayBounds) => void
         /** DURABLE bounds at drag/resize end — main snaps + persists. */
         reportBounds: (bounds: PluginOverlayBounds) => void
-        setIgnoreMouse: (ignore: boolean) => void
-        setFocusable: (focusable: boolean) => void
         /** Carve (rects) or clear ([]) the X11 window shape — no-compositor
          *  transparency for mascot silhouettes / card paint confirmation. */
         setShape: (rects: Array<{ x: number; y: number; width: number; height: number }>) => void
