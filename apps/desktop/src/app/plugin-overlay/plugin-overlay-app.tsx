@@ -38,7 +38,8 @@ interface ResizeState {
  *            which clamps the window into the main window's rect (the
  *            sprite never leaves the app). No header, no resize grip.
  *   card   — the interactive Q&A surface. Full opaque card, header drag,
- *            corner resize grip, ✕ returns to the mascot.
+ *            corner resize grip, – shrinks back to the mascot (no ✕ close:
+ *            the overlay's only exit is shrinking to the sprite).
  *
  * The window's geometry authority is THIS renderer (same contract as the
  * pet overlay): the header drags the window, the corner grip resizes it.
@@ -189,10 +190,6 @@ export function PluginOverlayApp({
     }
   }
 
-  const close = () => {
-    void bridge?.close()
-  }
-
   const backToMascot = () => {
     bridge?.setMode('mascot')
   }
@@ -291,29 +288,6 @@ export function PluginOverlayApp({
           type="button"
         >
           –
-        </button>
-        <button
-          aria-label="Close overlay"
-          onClick={close}
-          onPointerDown={e => e.stopPropagation()}
-          onPointerUp={e => e.stopPropagation()}
-          style={{
-            alignItems: 'center',
-            background: 'transparent',
-            border: '1px solid var(--ui-stroke-secondary)',
-            borderRadius: 6,
-            color: 'var(--ui-text-secondary)',
-            cursor: 'pointer',
-            display: 'flex',
-            height: 22,
-            justifyContent: 'center',
-            padding: 0,
-            width: 22
-          }}
-          title="Close overlay"
-          type="button"
-        >
-          ✕
         </button>
       </div>
 
