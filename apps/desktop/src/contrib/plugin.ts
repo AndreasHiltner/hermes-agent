@@ -67,13 +67,15 @@ export interface PluginOs {
   /** Write text to the system clipboard. Resolves false when unavailable. */
   writeClipboard: (text: string) => Promise<boolean>
   /** Pop this plugin's `area: 'pluginOverlay'` contribution out into a
-   *  transparent, always-on-top window that floats over ALL apps. The
-   *  PRODUCT POLICY is one overlay at a time: opening while another plugin
-   *  is popped out closes that window first. `bounds` (optional) are the
-   *  pane's in-window rect — main converts them to screen space so the
-   *  overlay lands where it sat. Resolves false when the shell can't (no
-   *  Electron, older desktop build, spawn failure). */
-  openOverlay: (bounds?: PluginOverlayBounds | null) => Promise<boolean>
+   *  transparent window with TWO postures. `mode: 'mascot'` (default null →
+   *  'card') spawns the small non-activating sprite bound to the app
+   *  window; `mode: 'card'` is the interactive Q&A card that floats above
+   *  other apps. The PRODUCT POLICY is one overlay at a time: opening
+   *  while another plugin is popped out closes that window first. `bounds`
+   *  (optional) are the pane's in-window rect — main converts them to
+   *  screen space so the overlay lands where it sat. Resolves false when
+   *  the shell can't (no Electron, older desktop build, spawn failure). */
+  openOverlay: (options?: { mode?: 'mascot' | 'card'; bounds?: PluginOverlayBounds | null }) => Promise<boolean>
   /** Close this plugin's overlay window (a pop-in affordance). Resolves
    *  false when unavailable or when no overlay is open. */
   closeOverlay: () => Promise<boolean>
@@ -210,9 +212,13 @@ function createPluginOs(pluginId: string): PluginOs {
     pickSavePath: options => attemptPath(async bridge => (await bridge.selectSavePath?.(options)) ?? null),
     revealPath: path => attempt(async bridge => (bridge.revealPath ? bridge.revealPath(path) : false)),
     writeClipboard: text => attempt(bridge => bridge.writeClipboard(text)),
-    openOverlay: bounds =>
+    openOverlay: (options?: { mode?: 'mascot' | 'card'; bounds?: PluginOverlayBounds | null }) =>
       attempt(async bridge => {
-        const res = await bridge.pluginOverlay?.open({ pluginId, bounds: bounds ?? undefined })
+        const res = await bridge.pluginOverlay?.open({
+          pluginId,
+          mode: options?.mode,
+          bounds: options?.bounds ?? undefined
+        })
 
         return res?.ok === true
       }),

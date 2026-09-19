@@ -297,8 +297,21 @@ import { mintGatewayWsTicket as mintOauthGatewayWsTicket, requestWithOauthFallba
 import { wireOauthSessionResponse } from './oauth-session-response'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { registerPetOverlayIpc } from './pet-overlay-ipc'
-import { clampToDisplay, defaultOverlayBounds, validateStoredBounds } from './plugin-overlay-geometry'
-import { registerPluginOverlayIpc, type PluginOverlayBounds } from './plugin-overlay-ipc'
+import {
+  clampMascotBounds,
+  clampToDisplay,
+  defaultMascotBounds,
+  defaultOverlayBounds,
+  normalizeOverlayBounds,
+  validateStoredBounds,
+  validateStoredMascotBounds,
+  PLUGIN_OVERLAY_DEFAULT_HEIGHT,
+  PLUGIN_OVERLAY_DEFAULT_WIDTH,
+  PLUGIN_OVERLAY_MASCOT_HEIGHT,
+  PLUGIN_OVERLAY_MASCOT_WIDTH
+} from './plugin-overlay-geometry'
+import { registerPluginOverlayIpc, type PluginOverlayBounds, type PluginOverlayMode } from './plugin-overlay-ipc'
+import { applyBoundsWithResizeFlip, type ResizeFlipWindow } from './resize-flip'
 import {
   pendingNotice as pendingPluginCompatNotice,
   recordDismissed as recordPluginCompatDismissed
@@ -466,7 +479,7 @@ import {
 import { registerWindowControlIpc, windowControlState } from './window-controls'
 import { createWindowOpenHandler } from './window-open-policy'
 import { installWindowRendererLifecycle } from './window-renderer-lifecycle'
-import { createWindowRevealController } from './window-reveal'
+import { createWindowRevealController, WINDOW_REVEAL_FALLBACK_MS } from './window-reveal'
 import {
   bindGeometryPersistence,
   computeWindowOptions,
@@ -14162,20 +14175,37 @@ function closePetOverlay() {
 // Map<pluginId, BrowserWindow> refactor for concurrent overlays is
 // mechanical. The two fields live in ONE record so they cannot drift in
 // lockstep (Vicky LOW).
-const pluginOverlay = { window: null as BrowserWindow | null, pluginId: null as string | null }
+const pluginOverlay = { window: null as BrowserWindow | null, pluginId: null as string | null, mode: null as 'mascot' | 'card' | null }
 
-// Per-plugin remembered bounds. Defaults only: once the user moves/resizes
-// an overlay, plugin-overlay-state.json wins (same pattern as hud-state.json).
+// Overlay lifecycle logging routes into the standard desktop.log via
+// rememberLog (the isolated test instance didn't write desktop.log, hence the
+// earlier /tmp file — that debug shim is gone now that the feature is stable).
+function overlayDbg(msg: string): void {
+  rememberLog(`[plugin-overlay] ${msg}`)
+}
+
+// Per-plugin remembered bounds, keyed by plugin AND posture (mascot/card) —
+// the two postures have incompatible geometry (fixed sprite vs resizable
+// card), so each remembers its own spot. Defaults only: once the user moves
+// or resizes an overlay, plugin-overlay-state.json wins (same pattern as
+// hud-state.json).
 const PLUGIN_OVERLAY_STATE_PATH = path.join(app.getPath('userData'), 'plugin-overlay-state.json')
 
-function readPluginOverlayBounds(pluginId: string): PluginOverlayBounds | null {
+function readPluginOverlayBounds(pluginId: string | null, mode: PluginOverlayMode): PluginOverlayBounds | null {
+  if (!pluginId) {
+    return null
+  }
+
   try {
     const raw = JSON.parse(fs.readFileSync(PLUGIN_OVERLAY_STATE_PATH, 'utf8'))
+    const stored = raw?.[pluginId]?.[mode]
 
     // Stored bounds are clamped against the CURRENT display topology at
     // spawn (see spawnPluginOverlayWindow) — a monitor that was attached at
     // save time may be gone now, and an off-screen respawn has no recovery.
-    return validateStoredBounds(raw?.[pluginId])
+    // Mascot records validate their own (smaller) minimum; the stored size
+    // is ignored on spawn — the fixed mascot size always wins.
+    return mode === 'mascot' ? validateStoredMascotBounds(stored) : validateStoredBounds(stored)
   } catch {
     // First run / unreadable — fall through to defaults.
   }
@@ -14188,6 +14218,15 @@ function persistPluginOverlayBounds(pluginId: string, bounds: PluginOverlayBound
     return
   }
 
+  // Persist under main's OWN latch: the plugin id AND the posture key come
+  // from main's state — a renderer can never write another plugin's spot or
+  // the wrong posture bucket.
+  const mode = pluginOverlay.mode
+
+  if (mode !== 'mascot' && mode !== 'card') {
+    return
+  }
+
   try {
     const existing = (() => {
       try {
@@ -14197,7 +14236,8 @@ function persistPluginOverlayBounds(pluginId: string, bounds: PluginOverlayBound
       }
     })()
 
-    existing[pluginId] = bounds
+    existing[pluginId] = existing[pluginId] || {}
+    existing[pluginId][mode] = bounds
     fs.mkdirSync(path.dirname(PLUGIN_OVERLAY_STATE_PATH), { recursive: true })
     writeFileAtomic(PLUGIN_OVERLAY_STATE_PATH, JSON.stringify(existing, null, 2))
   } catch (err) {
@@ -14215,21 +14255,215 @@ function pluginOverlayUrl(pluginId: string) {
   return `${pathToFileURL(resolveRendererIndex()).toString()}${query}#/`
 }
 
-function spawnPluginOverlayWindow(pluginId: string, bounds: PluginOverlayBounds | null | undefined) {
+// The overlay window's host rect for the mascot posture — the main window's
+// content area, falling back to the primary display when the main window is
+// gone (the mascot hides anyway, but the clamp must still be safe).
+function pluginOverlayHostRect() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return mainWindow.getContentBounds()
+  }
+
+  return screen.getPrimaryDisplay()?.workArea ?? { x: 0, y: 0, width: 1280, height: 720 }
+}
+
+// Card default when expanding from the mascot: centered on the host rect.
+function centeredCardBounds(host: { x: number; y: number; width: number; height: number }): PluginOverlayBounds {
+  const width = Math.min(PLUGIN_OVERLAY_DEFAULT_WIDTH, host.width)
+  const height = Math.min(PLUGIN_OVERLAY_DEFAULT_HEIGHT, host.height)
+
+  return {
+    x: host.x + Math.max(0, Math.round((host.width - width) / 2)),
+    y: host.y + Math.max(0, Math.round((host.height - height) / 2)),
+    width,
+    height
+  }
+}
+
+// Apply (or clear, with []) the X11 window shape. Same resizable-flip dance
+// as setBounds — Electron requires a resizable window for setShape on Linux.
+// A NON-EMPTY shape is the mascot's carved silhouette → fire the mascot
+// reveal gate. An EMPTY shape means the card painted its full opaque surface
+// → fire the card reveal gate. (The gate is a no-op once revealed.)
+function setPluginOverlayShape(win: BrowserWindow, rects: Array<{ x: number; y: number; width: number; height: number }>) {
+  const restoreLock = !win.isResizable()
+
+  // Empty from the renderer means "paint the full surface" (card intent).
+  // But X11's EMPTY shape means NOTHING is visible — `setShape([])` leaves a
+  // zero-area bounding shape and the card vanishes. Substitute the window's
+  // full rect so an empty report still shows the whole card.
+  const isSilhouette = rects.length > 0
+  const effective = isSilhouette ? rects : (() => {
+    const b = win.getBounds()
+
+    return [{ x: 0, y: 0, width: Math.max(1, b.width), height: Math.max(1, b.height) }]
+  })()
+
+  try {
+    if (restoreLock) {
+      win.setResizable(true)
+    }
+
+    try {
+      win.setShape(effective)
+      overlayDbg(`setShape rects=${rects.length} effective=${effective.length}`)
+    } finally {
+      if (restoreLock && !win.isDestroyed()) {
+        win.setResizable(false)
+      }
+    }
+  } catch {
+    // Shape unsupported — the window stays a full rect.
+  }
+
+  // Reveal gate: fire AFTER the shape call (success or not — an unshaped
+  // mascot is a visible square, but never invisible).
+  if (isSilhouette) {
+    pluginOverlayMascotReveal?.()
+  } else {
+    pluginOverlayCardReveal?.()
+  }
+}
+
+// Shape-gated reveals for the two postures. On compositor-less systems the
+// transparent window renders BLACK until its shape is carved, so every
+// posture transition hides the window first and reveals it only when the
+// renderer confirms its paint over the set-shape IPC (mascot: non-empty
+// silhouette; card: empty = full opaque surface). Fallback timers reveal
+// after the shared budget so a contribution that never reports can't strand
+// an invisible window.
+let pluginOverlayMascotReveal: null | (() => void) = null
+let pluginOverlayCardReveal: null | (() => void) = null
+let pluginOverlayRevealTimer: null | ReturnType<typeof setTimeout> = null
+// The window whose shape-gate has FIRED (revealed). The mascot's
+// main-window coupling must never show an unshaped (black) window when a
+// main-window event fires between spawn and the shape report.
+let pluginOverlayRevealedWin: null | BrowserWindow = null
+// The window the current gates belong to. An EVICTED window's 'closed' fires
+// AFTER the replacement spawns (async), and without this guard the stale
+// handler would wipe the new window's gates — leaving the new mascot
+// invisible forever.
+let pluginOverlayGateWin: null | BrowserWindow = null
+
+function armPluginOverlayReveal(kind: 'mascot' | 'card', win: BrowserWindow): void {
+  if (pluginOverlayRevealTimer) {
+    clearTimeout(pluginOverlayRevealTimer)
+    pluginOverlayRevealTimer = null
+  }
+
+  pluginOverlayGateWin = win
+  let revealed = false
+  const doReveal =
+    kind === 'card'
+      ? () => {
+          win.show()
+          // Taskbar avoidance AFTER show(): _NET_WM_STATE_SKIP_TASKBAR is a
+          // client message the WM only honors on a mapped window. The card is
+          // interactive (focusable:true, WM-managed) but must still not get
+          // its own taskbar entry.
+          win.setSkipTaskbar(!IS_MAC)
+          win.focus()
+          // DOM-level focus too: the card's input must be ready for
+          // keystrokes the moment the window appears.
+          win.webContents.focus()
+        }
+      : () => {
+          win.showInactive()
+          // Same AFTER-show re-pin: the sprite also stays out of the taskbar.
+          win.setSkipTaskbar(!IS_MAC)
+          // showInactive() does NOT restack — after the card flip lowered
+          // the window (setAlwaysOnTop(false)) it sits BELOW the main
+          // window, hidden inside its rect. Raise it back above the app
+          // layer on every reveal.
+          win.moveTop()
+        }
+
+  const gate = () => {
+    if (revealed || win.isDestroyed()) {
+      return
+    }
+
+    revealed = true
+    pluginOverlayGateWin = null
+    pluginOverlayRevealedWin = win
+    pluginOverlayMascotReveal = null
+    pluginOverlayCardReveal = null
+    if (pluginOverlayRevealTimer) {
+      clearTimeout(pluginOverlayRevealTimer)
+      pluginOverlayRevealTimer = null
+    }
+    doReveal()
+  }
+
+  if (kind === 'mascot') {
+    pluginOverlayMascotReveal = gate
+  } else {
+    pluginOverlayCardReveal = gate
+  }
+
+  pluginOverlayRevealTimer = setTimeout(() => {
+    pluginOverlayRevealTimer = null
+    gate()
+  }, WINDOW_REVEAL_FALLBACK_MS)
+
+  win.on('closed', () => {
+    // Only clear when THIS window still owns the gates (eviction ordering).
+    if (pluginOverlayGateWin !== win && pluginOverlayRevealedWin !== win) {
+      return
+    }
+
+    revealed = true
+    pluginOverlayGateWin = null
+    if (pluginOverlayRevealedWin === win) {
+      pluginOverlayRevealedWin = null
+    }
+    pluginOverlayMascotReveal = null
+    pluginOverlayCardReveal = null
+    if (pluginOverlayRevealTimer) {
+      clearTimeout(pluginOverlayRevealTimer)
+      pluginOverlayRevealTimer = null
+    }
+  })
+}
+
+function spawnPluginOverlayWindow(pluginId: string, mode: PluginOverlayMode, bounds: PluginOverlayBounds | null | undefined) {
+  overlayDbg(`spawnPluginOverlayWindow pluginId=${pluginId} mode=${mode} bounds=${JSON.stringify(bounds ?? null)}`)
   const cursorDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
   const workArea = cursorDisplay?.workArea
-  // Display-topology clamp (Vicky HIGH): remembered bounds from a
-  // disconnected monitor move to the nearest live display; a fresh spawn
-  // lands bottom-right of the cursor's display.
-  const spawned = bounds
-    ? clampToDisplay(bounds, screen.getAllDisplays().map(d => d.workArea))
-    : defaultOverlayBounds(workArea)
+  const mascot = mode === 'mascot'
+
+  // Mode-aware spawn geometry: the mascot gets its fixed sprite size
+  // (position clamped into the main window's rect — the sprite never leaves
+  // the app); the card uses remembered/default bounds clamped against the
+  // display topology.
+  let spawned: PluginOverlayBounds
+
+  if (mascot) {
+    const host = pluginOverlayHostRect()
+    const remembered = bounds ?? readPluginOverlayBounds(pluginId, 'mascot')
+    spawned = clampMascotBounds(remembered ?? defaultMascotBounds(host), host)
+  } else {
+    const remembered = bounds ?? readPluginOverlayBounds(pluginId, 'card')
+    spawned = remembered
+      ? clampToDisplay(remembered, screen.getAllDisplays().map(d => d.workArea))
+      : defaultOverlayBounds(workArea)
+  }
 
   const win = new BrowserWindow({
     width: spawned.width,
     height: spawned.height,
     x: spawned.x,
     y: spawned.y,
+    // Child window (WM_TRANSIENT_FOR → mainWindow) on Linux: a transient
+    // window gets NO taskbar entry and NO alt-tab slot from xfwm4, minimizes
+    // automatically with its parent, and stays stacked above it — all while
+    // focusable:true keeps WM_HINTS.input so the card takes keystrokes. This
+    // is the X11-standard dialog pattern and replaces the failed
+    // setSkipTaskbar/setFocusable juggling (skipTaskbar client-messages only
+    // land on mapped windows and still didn't keep a focusable window out of
+    // the xfwm4 taskbar; focusable:false made the window WM-unmanaged so a
+    // runtime setFocusable(true) never re-managed it). macOS ignores parent
+    // for taskbar purposes (cmd-tab is app-level) so it stays undefined there.
+    parent: IS_MAC || !mainWindow || mainWindow.isDestroyed() ? undefined : mainWindow,
     frame: false,
     transparent: true,
     resizable: false,
@@ -14237,18 +14471,21 @@ function spawnPluginOverlayWindow(pluginId: string, bounds: PluginOverlayBounds 
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
-    // No taskbar/alt-tab entry of its own (Windows/Linux); on macOS cmd-tab
-    // is app-level and Mission Control hiding keeps the main window the anchor.
+    // Belt-and-braces for non-Linux/macOS: transient handles Linux; this
+    // covers any WM that still lists an otherwise-normal window.
     skipTaskbar: !IS_MAC,
     hasShadow: false,
-    alwaysOnTop: true,
+    // Mascot: NOT always-on-top — it belongs to the Hermes desktop layer
+    // (under other apps, like the main window). Card: floats above.
+    alwaysOnTop: !mascot,
     hiddenInMissionControl: IS_MAC,
-    // INTERACTIVE by default (unlike the pet overlay's decoration-only
-    // posture): the overlay hosts real plugin UI — inputs, buttons — so it
-    // must be able to take keyboard focus.
+    // Always interactive: WM_HINTS.input must be set so the card takes
+    // keystrokes. Transient + skipTaskbar handle the taskbar, NOT focusable.
     focusable: true,
     show: false,
-    // Fully transparent — the renderer paints only the contribution.
+    // Fully transparent — the renderer paints only the contribution; the
+    // card mode paints its own full opaque surface (Electron cannot flip
+    // `transparent` at runtime — the content just fills the window).
     backgroundColor: '#00000000',
     webPreferences: {
       preload: PRELOAD_PATH,
@@ -14262,9 +14499,15 @@ function spawnPluginOverlayWindow(pluginId: string, bounds: PluginOverlayBounds 
     }
   })
 
-  // Float above other apps and follow the user across desktops (pet pattern).
-  win.setAlwaysOnTop(true, IS_MAC ? 'floating' : 'screen-saver')
+  // Mascot sits in the app layer; the card floats above (pet pattern).
+  win.setAlwaysOnTop(!mascot, IS_MAC ? 'floating' : 'screen-saver')
   win.setHiddenInMissionControl?.(true)
+
+  win.on('show', () => overlayDbg(`show ${pluginId}`))
+  win.on('hide', () => overlayDbg(`hide ${pluginId}`))
+  win.on('blur', () => overlayDbg(`blur ${pluginId}`))
+  win.on('focus', () => overlayDbg(`focus ${pluginId}`))
+  win.on('close', () => overlayDbg(`close ${pluginId}`))
 
   try {
     win.setVisibleOnAllWorkspaces(
@@ -14275,18 +14518,103 @@ function spawnPluginOverlayWindow(pluginId: string, bounds: PluginOverlayBounds 
     // Not supported everywhere — best effort.
   }
 
+  // ── Mascot ↔ main-window coupling ───────────────────────────────────────
+  // The mascot is BOUND to the Hermes desktop: it lives in the app's own
+  // layer (no always-on-top), hides when the main window hides/minimizes,
+  // follows moves/resizes with a re-clamp into the window rect, and raises
+  // itself above other windows only while Hermes itself is focused. Linux
+  // has no native child-window for frameless helpers, so this is bound
+  // manually (listeners removed when the overlay closes).
+  if (mascot) {
+    const follow = () => {
+      if (win.isDestroyed() || pluginOverlay.mode !== 'mascot') {
+        return
+      }
+
+      const { x, y } = win.getBounds()
+      applyBoundsWithResizeFlip(
+        win as ResizeFlipWindow,
+        clampMascotBounds(
+          { x, y, width: PLUGIN_OVERLAY_MASCOT_WIDTH, height: PLUGIN_OVERLAY_MASCOT_HEIGHT },
+          pluginOverlayHostRect()
+        )
+      )
+    }
+    const syncVisibility = () => {
+      if (win.isDestroyed() || pluginOverlay.mode !== 'mascot') {
+        return
+      }
+
+      const mw = mainWindow
+
+      if (!mw || mw.isDestroyed() || mw.isMinimized() || !mw.isVisible()) {
+        win.hide()
+      } else if (pluginOverlayRevealedWin === win) {
+        // Never show an unshaped mascot: on compositor-less systems the
+        // unshaped window is a black square. The shape gate reveals it.
+        win.showInactive()
+        // Same restack as the reveal: showInactive() alone leaves the
+        // mascot buried under the main window.
+        win.moveTop()
+      }
+    }
+    const raise = () => {
+      if (
+        !win.isDestroyed() &&
+        pluginOverlay.mode === 'mascot' &&
+        mainWindow &&
+        !mainWindow.isDestroyed() &&
+        !mainWindow.isMinimized()
+      ) {
+        win.moveTop()
+      }
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.on('minimize', syncVisibility)
+      mainWindow.on('restore', syncVisibility)
+      mainWindow.on('show', syncVisibility)
+      mainWindow.on('hide', syncVisibility)
+      mainWindow.on('move', follow)
+      mainWindow.on('resize', follow)
+      mainWindow.on('focus', raise)
+    }
+
+    win.on('closed', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.removeListener('minimize', syncVisibility)
+        mainWindow.removeListener('restore', syncVisibility)
+        mainWindow.removeListener('show', syncVisibility)
+        mainWindow.removeListener('hide', syncVisibility)
+        mainWindow.removeListener('move', follow)
+        mainWindow.removeListener('resize', follow)
+        mainWindow.removeListener('focus', raise)
+      }
+    })
+  }
+
   // The overlay sizes its own OS window — no inherited global zoom.
   wireCommonWindowHandlers(win, zoomWiringForWindowKind('pluginOverlay'))
 
-  wireWindowReveal(win, { show: () => win.show() })
+  // Reveal policy per posture. The CARD paints its own full opaque surface,
+  // so a normal reveal is safe. The MASCOT renders BLACK until its shape is
+  // carved on compositor-less systems — hold it hidden until the
+  // contribution reports its silhouette (set-shape IPC fires the gate).
+  if (mascot) {
+    armPluginOverlayReveal('mascot', win)
+  } else {
+    wireWindowReveal(win, { show: () => win.show() })
+  }
 
   installWindowRendererLifecycle(win, { kind: 'plugin-overlay', callbacks: { log: rememberLog } })
 
   win.on('closed', () => {
+    overlayDbg(`CLOSED ${pluginId}`)
     if (pluginOverlay.window === win) {
       const evictedId = pluginOverlay.pluginId
       pluginOverlay.window = null
       pluginOverlay.pluginId = null
+      pluginOverlay.mode = null
 
       // Pet pop-in parity: if the overlay went away on its own (⌘W, crash,
       // evicted by another plugin's open), the main renderer must learn so a
@@ -14298,24 +14626,34 @@ function spawnPluginOverlayWindow(pluginId: string, bounds: PluginOverlayBounds 
   })
 
   attachRendererConsoleCapture(win, 'plugin-overlay', rememberLog)
+
+  // Renderer-side death signals: a dead overlay must never resurrect itself
+  // over the app, but its loss belongs in desktop.log.
+  win.webContents.on('render-process-gone', (_e, details) => overlayDbg(`render-process-gone ${pluginId} ${JSON.stringify(details)}`))
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => overlayDbg(`did-fail-load ${pluginId} code=${code} desc=${desc} url=${url}`))
+
   loadWindowUrl(win, pluginOverlayUrl(pluginId), 'Plugin overlay')
 
   return win
 }
 
-function openPluginOverlay(pluginId: string, bounds: PluginOverlayBounds | null | undefined) {
+function openPluginOverlay(pluginId: string, mode: PluginOverlayMode, bounds: PluginOverlayBounds | null | undefined) {
+  overlayDbg(`openPluginOverlay pluginId=${pluginId} mode=${mode} bounds=${JSON.stringify(bounds ?? null)}`)
   if (pluginOverlay.window && !pluginOverlay.window.isDestroyed()) {
     if (pluginOverlay.pluginId === pluginId) {
-      if (bounds) {
-        pluginOverlay.window.setBounds({
-          x: Math.round(bounds.x),
-          y: Math.round(bounds.y),
-          width: Math.max(120, Math.round(bounds.width)),
-          height: Math.max(80, Math.round(bounds.height))
-        })
+      if (mode !== pluginOverlay.mode) {
+        // Posture flip on an existing window (mascot click → card, card ✕ →
+        // mascot, plugin re-request with another mode).
+        setPluginOverlayMode(mode)
+      } else if (bounds) {
+        applyBoundsWithResizeFlip(pluginOverlay.window as ResizeFlipWindow, snapPluginOverlayBounds(bounds))
       }
 
-      pluginOverlay.window.show()
+      if (mode === 'mascot') {
+        pluginOverlay.window.showInactive()
+      } else {
+        pluginOverlay.window.show()
+      }
 
       return pluginOverlay.window
     }
@@ -14327,18 +14665,93 @@ function openPluginOverlay(pluginId: string, bounds: PluginOverlayBounds | null 
   }
 
   pluginOverlay.pluginId = pluginId
-  pluginOverlay.window = spawnPluginOverlayWindow(pluginId, bounds)
+  pluginOverlay.mode = mode
+  pluginOverlay.window = spawnPluginOverlayWindow(pluginId, mode, bounds)
 
   return pluginOverlay.window
 }
 
 function closePluginOverlay() {
+  overlayDbg(`closePluginOverlay`)
   if (pluginOverlay.window && !pluginOverlay.window.isDestroyed()) {
     pluginOverlay.window.close()
   }
 
   pluginOverlay.window = null
   pluginOverlay.pluginId = null
+  pluginOverlay.mode = null
+}
+
+// Flip the hosted window's posture. The renderer asks (mascot click → card,
+// card ✕ → mascot); main owns the geometry and native posture. On
+// compositor-less systems every flip goes HIDE → resize → posture → gate →
+// renderer paint → shape → reveal, so no transition ever flashes the black
+// unshaped window.
+function setPluginOverlayMode(mode: PluginOverlayMode) {
+  const win = pluginOverlay.window
+
+  if (!win || win.isDestroyed() || pluginOverlay.mode === mode) {
+    return
+  }
+
+  const pluginId = pluginOverlay.pluginId
+  overlayDbg(`setPluginOverlayMode pluginId=${pluginId} mode=${mode}`)
+
+  // Both transitions start hidden: the old posture's pixels must never be
+  // visible at the new posture's size.
+  win.hide()
+
+  if (mode === 'card') {
+    // Expand: remembered card bounds, else a centered default. Interactive
+    // and above other windows.
+    const remembered = pluginId ? readPluginOverlayBounds(pluginId, 'card') : null
+    const displays = screen.getAllDisplays().map(d => d.workArea)
+    const expanded = remembered ? clampToDisplay(remembered, displays) : centeredCardBounds(pluginOverlayHostRect())
+
+    applyBoundsWithResizeFlip(win as ResizeFlipWindow, expanded)
+    win.setAlwaysOnTop(true, IS_MAC ? 'floating' : 'screen-saver')
+    pluginOverlay.mode = 'card'
+
+    // The renderer swaps to the card and reports an EMPTY shape (the card
+    // paints its own full opaque surface — the no-compositor way to be
+    // non-transparent). The gate reveals only then. The focusable flip now
+    // happens inside the reveal (after show()), where X11 actually honors it.
+    armPluginOverlayReveal('card', win)
+  } else {
+    // Shrink: back to the sprite, clamped into the main window, in the app
+    // layer (not on top), non-activating.
+    const remembered = pluginId ? readPluginOverlayBounds(pluginId, 'mascot') : null
+    const host = pluginOverlayHostRect()
+    const clamped = clampMascotBounds(remembered ?? defaultMascotBounds(host), host)
+
+    // Mode FIRST: the raise-listener gate reads it — the blur below hands
+    // focus back to the main window, whose focus event must be able to
+    // raise this window again.
+    pluginOverlay.mode = 'mascot'
+
+    win.blur()
+    win.setAlwaysOnTop(false)
+    applyBoundsWithResizeFlip(win as ResizeFlipWindow, clamped)
+
+    // The renderer swaps to the sprite and reports its silhouette rects;
+    // the carve + reveal fire on the set-shape IPC. The focusable flip now
+    // happens inside the reveal (after showInactive()).
+    armPluginOverlayReveal('mascot', win)
+  }
+
+  // The renderer swaps its view (sprite ↔ card) on this event.
+  win.webContents.send('hermes:plugin-overlay:mode', mode)
+}
+
+// Posture-aware geometry enforcement for renderer-reported bounds.
+function snapPluginOverlayBounds(bounds: PluginOverlayBounds): PluginOverlayBounds {
+  const normalized = normalizeOverlayBounds(bounds) ?? bounds
+
+  if (pluginOverlay.mode === 'mascot') {
+    return clampMascotBounds(normalized, pluginOverlayHostRect())
+  }
+
+  return normalized
 }
 
 // ── HUD mode ────────────────────────────────────────────────────────────────
@@ -15680,8 +16093,18 @@ registerPluginOverlayIpc({
   getMainWindow: () => mainWindow,
   getOverlayWindow: () => pluginOverlay.window,
   getOverlayPluginId: () => pluginOverlay.pluginId,
+  getOverlayMode: () => pluginOverlay.mode,
   openOverlay: openPluginOverlay,
   closeOverlay: closePluginOverlay,
+  setOverlayMode: setPluginOverlayMode,
+  snapBounds: snapPluginOverlayBounds,
+  setShape: rects => {
+    const win = pluginOverlay.window
+
+    if (win && !win.isDestroyed()) {
+      setPluginOverlayShape(win, rects)
+    }
+  },
   persistBounds: persistPluginOverlayBounds,
   readBounds: readPluginOverlayBounds
 })
