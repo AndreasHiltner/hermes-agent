@@ -78,6 +78,8 @@ function FloatingPane({ pane }: { pane: Contribution }) {
 
     return stored ? { ...spawned, x: stored.x, y: stored.y } : spawned
   })
+  const rectRef = useRef(rect)
+  rectRef.current = rect
 
   const [collapsed, setCollapsed] = useState(() => readStored()[pane.id]?.collapsed ?? false)
 
@@ -190,30 +192,30 @@ function FloatingPane({ pane }: { pane: Contribution }) {
 
     resize.current = { x: event.clientX, y: event.clientY }
 
-    setSize(current => {
-      const next = clampFloatingRectSize(
-        {
-          ...rect,
-          width: current.width + (event.clientX - from.x),
-          height: current.height + (event.clientY - from.y)
-        },
-        viewport.current
-      )
+    // Compute the next size from the committed rect (read via ref, never a
+    // stale closure), then commit BOTH mirrors in one pass. The far corner
+    // stays put: a bottom-right handle grows the card right/down, so x/y do
+    // not move with the size. clampFloatingRectSize already re-clamps the
+    // position with the NEW size for the rare case the card outgrows the
+    // viewport.
+    const next = clampFloatingRectSize(
+      {
+        ...rectRef.current,
+        width: sizeRef.current.width + (event.clientX - from.x),
+        height: sizeRef.current.height + (event.clientY - from.y)
+      },
+      viewport.current
+    )
+    const nextRect = clampFloatingRect(
+      { ...rectRef.current, width: next.width, height: next.height },
+      viewport.current
+    )
 
-      // The far corner stays put: a bottom-right handle grows the card
-      // right/down, so x/y do not move with the size. clampFloatingRectSize
-      // already re-clamps the position with the NEW size for the rare case
-      // the card outgrows the viewport.
-      setRect(prev =>
-        clampFloatingRect(
-          { ...prev, width: next.width, height: next.height },
-          viewport.current
-        )
-      )
-
-      return { width: next.width, height: next.height }
-    })
-  }, [rect])
+    sizeRef.current = { width: next.width, height: next.height }
+    rectRef.current = nextRect
+    setSize({ width: next.width, height: next.height })
+    setRect(nextRect)
+  }, [])
 
   const onResizeUp = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -223,11 +225,11 @@ function FloatingPane({ pane }: { pane: Contribution }) {
 
       resize.current = null
       event.currentTarget.releasePointerCapture?.(event.pointerId)
-      // rect mirrors size (both are updated in the same handler), so persist
-      // the pair that React already committed — not a stale closure.
-      persist(rect, sizeRef.current, collapsed)
+      // The refs are committed synchronously in onResizeMove (exact size and
+      // rect, no lag) — persist that pair, not a stale React closure.
+      persist(rectRef.current, sizeRef.current, collapsed)
     },
-    [collapsed, persist, rect]
+    [collapsed, persist]
   )
 
   return (
