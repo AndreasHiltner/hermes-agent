@@ -260,7 +260,8 @@ spot. Nothing exempts the pane (not user placement records, not a burned heal
 token), but the invariant is boot-scoped: an intra-session drag sticks until
 the next launch. Reserve it for panes that are part of the surface's identity
 (the newswire ticker's bottom strip, Bot Mode's panes), not for panes whose
-position belongs to the user.
+position belongs to the user. An enforced pane cannot be permanently undocked:
+a deliberate drag away sticks only until the next launch.
 
 Closing the only pane contributed by a plugin disables that plugin, which can
 be re-enabled from **Capabilities → Plugins**. When a plugin contributes multiple

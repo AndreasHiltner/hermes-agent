@@ -107,7 +107,8 @@ The ONLY import surface is `@hermes/plugin-sdk` (plus `react` /
   is boot-scoped: an intra-session drag sticks until the next launch.
   Use it for panes that are part of the surface's identity (Bot Mode's
   Bots/Cronjobs panes, the newswire ticker) — not for panes whose position
-  belongs to the user.
+  belongs to the user. An enforced pane cannot be permanently undocked: a
+  deliberate drag away sticks only until the next launch.
 - Full PAGES: register `area: ROUTES_AREA` with `data: { path: '/my-page' }`
   and a `render` — the page mounts in the workspace (main) pane like any
   built-in view. Make it reachable with a sidebar nav row:
