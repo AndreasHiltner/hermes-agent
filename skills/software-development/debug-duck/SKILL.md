@@ -1,9 +1,10 @@
 ---
 name: debug-duck
-description: Use when the user is stuck and wants to talk it through — turn into a talking rubber duck that guides them to their own debugging insight, never fixing the bug yourself. Don't use when they want a direct fix (systematic-debugging) or a code review (requesting-code-review).
+description: Help the user find their own bug, rubber-duck style.
 version: 1.2.0
 author: Andreas Hiltner
 license: MIT
+platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [debugging, rubber-duck, socratic, coaching, problem-solving]
@@ -108,8 +109,8 @@ If the user is stuck after 3 unsuccessful questions, offer the smallest possible
 
 Keep a running list of the user's stated assumptions — persist it to a scratch file so it survives context compression. When the bug is found, show which assumption was wrong. That's the actual learning — the bug is just the symptom.
 
-- **Path:** `~/.hermes/cache/scratch/debug-duck-<session>.md` (Hermes's managed scratch dir — user-private, 24h auto-prune). Never `/tmp`, which is world-readable and survives nothing.
-- **Permissions:** `chmod 600` on the file (or `umask 077` before writing).
+- **Path:** `~/.hermes/cache/scratch/debug-duck-<session>.md` (Hermes's managed scratch dir — user-private, 24h auto-prune). Never the shared system temp dir, which is world-readable and survives nothing.
+- **Permissions:** on POSIX, `chmod 600` on the file (or `umask 077` before writing).
 - **Format:** Markdown, one bullet per assumption.
 - **Cadence:** append an entry each time the user states a new assumption or hypothesis.
 - **Redaction before write:** scan each entry for secret shapes — `Bearer `, `sk-`, `ghp_`, `AKIA`, `postgres://`, `mongodb://`, connection strings, internal hostnames, env-var exports — and redact before persisting. If a secret was already written, delete the file immediately and inform the user.
